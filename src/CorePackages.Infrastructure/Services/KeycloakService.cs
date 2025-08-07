@@ -45,7 +45,7 @@ namespace CorePackages.Infrastructure
 
             if (response.StatusCode != System.Net.HttpStatusCode.Created)
             {
-                throw new BusinessException(Errors.Patient.PatientCreateError);
+                throw new BusinessException(Errors.User.UserCreateError);
             }
         }
 
@@ -59,7 +59,7 @@ namespace CorePackages.Infrastructure
 
             if (response.StatusCode != System.Net.HttpStatusCode.NoContent)
             {
-                throw new BusinessException(Errors.Patient.PatientUpdateError);
+                throw new BusinessException(Errors.User.UserUpdateError);
             }
         }
 
