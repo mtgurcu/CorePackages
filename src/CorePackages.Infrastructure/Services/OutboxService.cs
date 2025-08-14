@@ -101,7 +101,31 @@ namespace CorePackages.Infrastructure.Services
             return result;
 
         }
-        protected abstract Task ProcessTransactionAsync(OutboxEntity outboxEntity, QuartzConfigurations config);
+        private async Task ProcessTransactionAsync(OutboxEntity outboxEntity, QuartzConfigurations config)
+        {
+            try
+            {
+                _logger.LogInformation("Processing  transaction with ID: {TransactionId}", outboxEntity.Id);
+
+                await SendApiRequestAsync(outboxEntity);
+
+                if (config.MaxRetryCount > 0 && outboxEntity.RetryCount >= config.MaxRetryCount)
+                {
+                    _logger.LogWarning("Transaction ID: {TransactionId} reached max retry count ({MaxRetryCount}). Marking as failed.", outboxEntity.Id, config.MaxRetryCount);
+                    outboxEntity.Status = OutboxStatus.Failed.ToString();
+                }
+
+                outboxEntity.IsLocked = false;
+                outboxEntity.UpdatedDate = DateTime.UtcNow;
+                await _outboxRepository.UpdateTransaction(outboxEntity);
+
+                _logger.LogInformation("Transaction ID: {TransactionId} updated in database.", outboxEntity.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Transaction ID: {TransactionId} error.", outboxEntity.Id);
+            }
+        }
         protected async Task<ApiResponse<T>> SendApiRequestAsync(OutboxEntity outboxEntity)
         {
             var result = new ApiResponse<T>(false, "");

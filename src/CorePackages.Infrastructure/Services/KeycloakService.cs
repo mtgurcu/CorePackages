@@ -1,7 +1,8 @@
 ﻿using CorePackages.Infrastructure.Dto;
 using CorePackages.Infrastructure.Dto.Exceptions;
+using CorePackages.Infrastructure.Dto.Keycloak;
+using CorePackages.Infrastructure.Extentions;
 using CorePackages.Infrastructure.Interfaces;
-using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System.Net.Http.Headers;
 
@@ -9,102 +10,129 @@ namespace CorePackages.Infrastructure
 {
     public class KeycloakService : IKeycloakService
     {
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly IConfigurationHelper<KeycloakConfig> _keycloakConfig;
-        private readonly ILogger<KeycloakService> _logger;
+        private readonly KeycloakConfig _keycloakConfig;
         private readonly HttpClient _httpClient;
-        public KeycloakService(IHttpClientFactory httpClientFactory, IConfigurationHelper<KeycloakConfig> keycloakConfig, ILogger<KeycloakService> logger)
+        private readonly ICacheService _cacheService;
+
+        public KeycloakService(
+            IConfigurationHelper<KeycloakConfig> keycloakConfig,
+            HttpClient httpClient,
+            ICacheService cacheService)
         {
-            _httpClientFactory = httpClientFactory;
-            _keycloakConfig = keycloakConfig;
-            _logger = logger;
-            _httpClient = _httpClientFactory.CreateClient("KeycloakClient");
+            _keycloakConfig = keycloakConfig.GetConfigurationAsync("KeycloakConfig").GetAwaiter().GetResult();
+            _httpClient = httpClient;
+            _cacheService = cacheService;
         }
 
-        public async Task<ApiResponse<object>> CreateUserAsync(CreateUserRequest request)
+        public async Task<ApiResponse<object>> CreateUserAsync(User request, RoleRepresantationRequest roleRepresantationRequest = null)
         {
-            var keycloakConfig = await _keycloakConfig.GetConfigurationAsync("KeycloakConfig");
+            var user = await GetUserByUsername(request.username);
 
-            var user = await GetUserByUsername(request, keycloakConfig);
-
-            if (user.Any())
-                await UpdateKeycloakUser(request, keycloakConfig, user.FirstOrDefault().Id);
+            if (user != null)
+                await UpdateKeycloakUser(request, user.Id);
             else
-                await CreateKeycloakUser(request, keycloakConfig);
+                await CreateKeycloakUser(request);
+
+            if (roleRepresantationRequest != null)
+                await UpdateUserRoleAsync(roleRepresantationRequest);
 
             return new ApiResponse<object>(true, "");
         }
-
-        private async Task CreateKeycloakUser(CreateUserRequest request, KeycloakConfig keycloakConfig)
+        public async Task<UserResponse> UpdateUserRoleAsync(RoleRepresantationRequest model)
         {
-            var jsonContent = new StringContent(JsonConvert.SerializeObject(request), System.Text.Encoding.UTF8, "application/json");
+            var user = await GetUserByUsername(model.Username);
+            if (user == null)
+                throw new BusinessException(Errors.User.UserNotExist);
 
-            var url = $"/admin/realms/{keycloakConfig.RealmName}/users";
+            var url = $"/admin/realms/{_keycloakConfig.RealmName}/users/{user.Id}/role-mappings/realm";
 
-            var response = await _httpClient.PostAsync(url, jsonContent);
+            var rolesToAdd = new List<RoleRepresantationResponse>();
 
-            if (response.StatusCode != System.Net.HttpStatusCode.Created)
+            foreach (var role in model.RolesToAdd)
             {
-                throw new BusinessException(Errors.User.UserCreateError);
+                var roleRepresentation = await GetRoleRepresentationAsync(role);
+                rolesToAdd.Add(roleRepresentation);
             }
-        }
 
-        private async Task UpdateKeycloakUser(CreateUserRequest request, KeycloakConfig keycloakConfig, string id)
-        {
-            var jsonContent = new StringContent(JsonConvert.SerializeObject(request), System.Text.Encoding.UTF8, "application/json");
+            if (rolesToAdd.Any())
+                await _httpClient.SendAsync(HttpMethod.Post, url, rolesToAdd);
 
-            var url = $"/admin/realms/{keycloakConfig.RealmName}/users/{id}";
+            var rolesToDelete = new List<RoleRepresantationResponse>();
 
-            var response = await _httpClient.PutAsync(url, jsonContent);
-
-            if (response.StatusCode != System.Net.HttpStatusCode.NoContent)
+            foreach (var role in model.RolesToRemove)
             {
-                throw new BusinessException(Errors.User.UserUpdateError);
+                var roleRepresentation = await GetRoleRepresentationAsync(role);
+                rolesToDelete.Add(roleRepresentation);
             }
+
+            if (rolesToDelete.Any())
+                await _httpClient.SendAsync(HttpMethod.Delete, url, rolesToDelete);
+
+            return user;
         }
-
-        private async Task<List<KeycloakUserResponse>> GetUserByUsername(CreateUserRequest request, KeycloakConfig keycloakConfig)
+        #region Internal Methods
+        private async Task CreateKeycloakUser(User request)
         {
-            var token = await GetTokenAsync(keycloakConfig);
-
+            var url = $"/admin/realms/{_keycloakConfig.RealmName}/users";
+            await _httpClient.SendAsync(HttpMethod.Post, url, request);
+        }
+        private async Task UpdateKeycloakUser(User request, string id)
+        {
+            var url = $"/admin/realms/{_keycloakConfig.RealmName}/users/{id}";
+            await _httpClient.SendAsync(HttpMethod.Put, url, request);
+        }
+        private async Task<UserResponse?> GetUserByUsername(string userName)
+        {
+            var token = await GetTokenAsync();
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            var url = $"/admin/realms/{keycloakConfig.RealmName}/users?username={request.username}";
-            var searchResponse = await _httpClient.GetAsync(url);
+            var url = $"/admin/realms/{_keycloakConfig.RealmName}/users?username={userName}";
+            var users = await _httpClient.SendAsync<List<UserResponse>>(HttpMethod.Get, url);
 
-            var keycloakUser = JsonConvert.DeserializeObject<List<KeycloakUserResponse>>(await searchResponse.Content.ReadAsStringAsync());
-
-            return keycloakUser;
+            return users?.FirstOrDefault();
         }
-
-        private async Task<string> GetTokenAsync(KeycloakConfig keycloakConfig)
+        private async Task<string> GetTokenAsync()
         {
+            var cachedLoginResponse = _cacheService.Get<CachedToken>("KEYCLOAK_API_TOKEN");
 
-            var client = _httpClientFactory.CreateClient("KeycloakClient");
+            if (!IsTokenExpired(cachedLoginResponse))
+            {
+                return cachedLoginResponse.accessToken;
+            }
 
-            var tokenRequest = new HttpRequestMessage(HttpMethod.Post, $"/realms/{keycloakConfig.RealmName}/protocol/openid-connect/token")
+            var tokenRequest = new HttpRequestMessage(HttpMethod.Post, $"/realms/{_keycloakConfig.RealmName}/protocol/openid-connect/token")
             {
                 Content = new FormUrlEncodedContent(new[]
-                {
+                          {
                 new KeyValuePair<string, string>("grant_type", "client_credentials"),
-                new KeyValuePair<string, string>("client_id", keycloakConfig.ClientId),
-                new KeyValuePair<string, string>("client_secret", keycloakConfig.ClientSecret)
+                new KeyValuePair<string, string>("client_id",_keycloakConfig.ClientId),
+                new KeyValuePair<string, string>("client_secret",_keycloakConfig.ClientSecret)
             })
             };
 
-            _logger.LogInformation($"GetTokenAsync requestString: {JsonConvert.SerializeObject(tokenRequest)}");
+            var url = $"/realms/{_keycloakConfig.RealmName}/protocol/openid-connect/token";
 
-            var response = await client.SendAsync(tokenRequest);
+            var response = await _httpClient.SendAsync<TokenResponse>(HttpMethod.Post, url, tokenRequest);
 
-            response.EnsureSuccessStatusCode();
+            var token = response?.access_token;
 
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            _logger.LogInformation($"GetTokenAsync response: {responseContent}");
-
-            var token = JsonConvert.DeserializeObject<KeycloakTokenResponse>(responseContent)?.access_token;
             return token ?? "";
         }
+        private async Task<RoleRepresantationResponse> GetRoleRepresentationAsync(string roleName)
+        {
+            var url = $"/admin/realms/{_keycloakConfig.RealmName}/roles/{roleName}";
+            return await _httpClient.SendAsync<RoleRepresantationResponse>(HttpMethod.Get, url);
+        }
+        private static bool IsTokenExpired(CachedToken cachedToken)
+        {
+            if (cachedToken == null)
+            {
+                return true;
+            }
+            var buffer = TimeSpan.FromMinutes(1);
 
+            return cachedToken.ExpireDate <= DateTime.Now.Add(buffer);
+        }
+        #endregion
     }
 }

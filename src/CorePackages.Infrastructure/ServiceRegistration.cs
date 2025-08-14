@@ -20,6 +20,10 @@ namespace CorePackages.Infrastructure
         {
             services.AddSingleton<IHttpContextService, HttpContextService>();
 
+            services.AddMemoryCache();
+
+            services.AddSingleton<ICacheService, CacheService>();
+
             services.AddScoped<IMediatrService, MediatrService>();
 
             services.AddMediatR(conf => conf.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
@@ -54,7 +58,10 @@ namespace CorePackages.Infrastructure
                 c.BaseAddress = new Uri(keycloakConfig.BaseAddress);
             });
 
-            services.AddScoped<IKeycloakService, KeycloakService>();
+            services.AddHttpClient<IKeycloakService, KeycloakService>(client =>
+            {
+                client.BaseAddress = new Uri(keycloakConfig.BaseAddress);
+            });
 
             services.AddAuthentication(options =>
             {

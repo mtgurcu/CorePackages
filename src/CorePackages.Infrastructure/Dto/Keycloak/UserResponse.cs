@@ -1,8 +1,8 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace CorePackages.Infrastructure.Dto
+namespace CorePackages.Infrastructure.Dto.Keycloak
 {
-    public class KeycloakUserResponse
+    public class UserResponse
     {
         [JsonPropertyName("id")]
         public string Id { get; set; }

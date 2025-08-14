@@ -15,8 +15,9 @@
     {
         public static class User
         {
-            public static readonly Error UserCreateError = new("P006", "User can not created.");
-            public static readonly Error UserUpdateError = new("P007", "User can not updated.");
+            public static readonly Error UserCreateError = new("U001", "User can not created.");
+            public static readonly Error UserUpdateError = new("U002", "User can not updated.");
+            public static readonly Error UserNotExist = new("U003", "User not exist.");
         }
         public static class Validation
         {

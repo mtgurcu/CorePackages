@@ -1,6 +1,11 @@
-﻿namespace CorePackages.Infrastructure.Dto
+﻿namespace CorePackages.Infrastructure.Dto.Keycloak
 {
     public class CreateUserRequest
+    {
+        public RoleRepresantationRequest Roles { get; set; }
+        public User User { get; set; }
+    }
+    public class User
     {
         public string username { get; set; }
         public string firstName { get; set; }
